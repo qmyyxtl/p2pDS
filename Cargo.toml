@@ -1,0 +1,29 @@
+[package]
+name = "DS-porep"
+version = "0.1.0"
+authors = ["Wu Chenggang <wuchenggang@sjtu.edu.cn>"]
+
+[dependencies]
+libp2p = { version = "0.35.1", features = ["tcp-tokio"] }
+tokio = { version = "0.3", features = ["io-util", "io-std", "stream", "macros", "rt", "rt-multi-thread", "fs", "time", "sync"] }
+serde = {version = "~1.0.0", features = ["derive"] }
+serde_json = "=1.0"
+once_cell = "1.5"
+log = "0.4"
+pretty_env_logger = "0.4"
+async-trait = "0.1.42"
+futures = "0.3.12"
+lazy_static = "*"
+uuid = { version = "0.8", features = ["serde", "v4"] }
+libc = "0.2"
+anyhow = "1.0.26"
+bincode = "1.1.2"
+filecoin-proofs-v1 = { package = "filecoin-proofs", path = "/home/wcg/.cargo/registry/src/github.com-1ecc6299db9ec823/filecoin-proofs-6.1.0", default-features = false, features = ["blst","gpu"] }
+storage-proofs = { version="6.0.0", default-features = false, features = ["blst","gpu"] }
+storage-proofs-porep = { version="6.1.0", default-features = false, features = ["blst","gpu"] }
+filecoin-hashers = { version = "~1.1.0", default-features = false, features = ["poseidon", "sha256"] }
+bellperson = { version = "~0.13.0", default-features = false, features = ["gpu"] }
+fr32 = { version = "~0.2.0", default-features = false, features = ["blst"] }
+tempfile = "3.2.0"
+base64 = "0.13.0"
+rayon = "1.5.0"
