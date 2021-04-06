@@ -2,6 +2,7 @@
 name = "DS-porep"
 version = "0.1.0"
 authors = ["Wu Chenggang <wuchenggang@sjtu.edu.cn>"]
+edition = "2018"
 
 [dependencies]
 libp2p = { version = "0.35.1", features = ["tcp-tokio"] }

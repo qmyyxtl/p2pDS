@@ -15,7 +15,6 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tokio::{fs, io::AsyncBufReadExt, sync::mpsc};
-extern crate redis;
 #[macro_use]
 extern crate lazy_static;
 extern crate libc;
@@ -40,19 +39,20 @@ fn load_peer_data() -> PeerMetadata {
 }
 
 lazy_static! {
-    #[derive(Debug, Serialize, Deserialize)]
     pub static ref PEERINFO: Mutex<PeerMetadata> = {
         let p: PeerMetadata = load_peer_data();
         Mutex::new(p)
-    };    
-}
+    };
 
-lazy_static! {
-    #[derive(Debug, Serialize, Deserialize)]
     static ref PROVE_STATUS: Mutex<HashMap<String, HashMap<String, bool>>> = {
         let p: HashMap<String, HashMap<String, bool>> = HashMap::new();
         Mutex::new(p)
-    };    
+    };
+
+    static ref LOCAL_BLOCKS: Mutex<HashMap<String, DataBlock>> = {
+        let local_blocks: HashMap<String, DataBlock> = HashMap::new();
+        Mutex::new(local_blocks)
+    };
 }
 
 pub const CODE_M: u8 = 6;
@@ -382,6 +382,7 @@ async fn store_file(cmd: &str, _swarm: &mut Swarm<DataBlockBehaviour>) {
             uuids.push(uid9);
 
             let mut p = PEERINFO.lock().unwrap();
+            let mut group: Vec<DataBlock> = Vec::new();
             for i in 0..vec.len() {
                 let mut recovery_nodes: Vec<String> = Vec::new();
                 if i == 3 || i == 8 {
@@ -415,11 +416,13 @@ async fn store_file(cmd: &str, _swarm: &mut Swarm<DataBlockBehaviour>) {
                     path: uuids.get(i).unwrap().to_string(),
                     peers: vec![PEER_ID.to_string()],
                 };
+                group.push(data_block.clone());
                 p.data_blocks.insert(data_block.block_id.clone(), data_block);
                 // save_file(&vec[i], &uuids.get(i).unwrap()[..], STORAGE_BLOCK_PATH).unwrap();
             }
             p.stored_size += file_size;
             p.file.insert(file_id.clone(), file_meta);
+            add_to_prove_group(&mut group, &mut p).unwrap();
             let j = serde_json::to_string(&*p).unwrap();
             fs::write(STORAGE_FILE_PATH, j).await.expect("Unable to write file");
             info!("Stored file id {}", file_id);
@@ -716,6 +719,7 @@ fn cleanup() {
     let mut peer_info = PEERINFO.lock().unwrap();
     peer_info.file.clear();
     peer_info.data_blocks.clear();
+    peer_info.proof_groups.clear();
     peer_info.stored_size = 0;
     let j = serde_json::to_string(&*peer_info).unwrap();
     std::fs::write(STORAGE_FILE_PATH, j).expect("Unable to write file");
@@ -744,28 +748,30 @@ async fn main() -> Result<()>
     let (prove_tx, mut prove_rx) = mpsc::unbounded_channel();
     let (broadcast_sender, mut broadcast_rcv) = mpsc::unbounded_channel();
     let mut channels: HashMap<String, mpsc::UnboundedSender<RecoverResponse>> = HashMap::new();
-    let mut local_blocks: HashMap<String, DataBlock> = HashMap::new();
     let peer_info = load_peer_data();
     let data_blocks = peer_info.data_blocks.clone();
-    for (block_id, block) in data_blocks.iter() {
-        for peer in block.peers.iter() {
-            if *peer != PEER_ID.to_string() {
-                let mut prove_status = PROVE_STATUS.lock().unwrap();
-                let peer_prove_status = prove_status.get_mut(peer);
-                match peer_prove_status {
-                    Some(status) => {
-                        status.insert(block_id.clone(), true);
-                    },
-                    None => {
-                        let mut tmp = HashMap::new();
-                        tmp.insert(block_id.clone(), true);
-                        prove_status.insert(peer.to_string(), tmp);
-                    },
+    {
+        let mut local_blocks = LOCAL_BLOCKS.lock().unwrap();
+        for (block_id, block) in data_blocks.iter() {
+            for peer in block.peers.iter() {
+                if *peer != PEER_ID.to_string() {
+                    let mut prove_status = PROVE_STATUS.lock().unwrap();
+                    let peer_prove_status = prove_status.get_mut(peer);
+                    match peer_prove_status {
+                        Some(status) => {
+                            status.insert(block_id.clone(), true);
+                        },
+                        None => {
+                            let mut tmp = HashMap::new();
+                            tmp.insert(block_id.clone(), true);
+                            prove_status.insert(peer.to_string(), tmp);
+                        },
+                    }
                 }
             }
-        }
-        if block.local == true {
-            local_blocks.insert(block_id.clone(), block.clone());
+            if block.local == true {
+                local_blocks.insert(block_id.clone(), block.clone());
+            }
         }
     }
     
@@ -893,7 +899,7 @@ async fn main() -> Result<()>
                     cmd if cmd.starts_with("load") => extract_file(cmd, &mut swarm).await,
                     cmd if cmd.starts_with("store") => store_file(cmd, &mut swarm).await,
                     cmd if cmd.starts_with("cast") => {
-                        tokio::spawn(broadcast(broadcast_sender.clone(), local_blocks.clone()));
+                        tokio::spawn(broadcast(broadcast_sender.clone(), LOCAL_BLOCKS.lock().unwrap().clone()));
                     },
                     cmd if cmd.starts_with("recover") => {
                         {
@@ -915,20 +921,22 @@ async fn main() -> Result<()>
                         let rest = cmd.strip_prefix("prove ");
                         match rest {
                             Some(file_name) => {
-                                if local_blocks.contains_key(file_name) == false {
-                                    error!("No such block in local");
-                                } else {
-                                    let file_size = local_blocks.get(file_name).unwrap().size as u64;
-                                    let mut sector_size: u64 = 8388608;
-                                    if file_size > 8323072 {
-                                        sector_size = 536870912;
-                                    }
+                                let proof_groups: Vec<ProofGroup>;
+                                {
+                                    let peer_info = PEERINFO.lock().unwrap();
+                                    proof_groups = peer_info.proof_groups.clone();
+                                }
+                                if let Some(proof_group) = proof_groups.iter().find(|&p| p.unsealed_cid == file_name) {
+                                    let sector_size: u64 = proof_group.sector_size;
                                     let sealer_id = Uuid::new_v4().to_simple().to_string();
-                                    let cmd1: String = file_name.to_string().clone();
                                     let thread_id = sealer_id.clone();
                                     let tx = prove_tx.clone();
                                     let ct = Arc::new(AtomicBool::new(true));
-                                    std::thread::spawn(move || prove_file(cmd1, tx, thread_id, sector_size, 4, ct));
+                                    let thread_group = proof_group.clone();
+                                    std::thread::spawn(move || prove_file(thread_group, tx, thread_id, sector_size, 4, ct));
+                                }
+                                else {
+                                    error!("No such block in local");
                                 }
                             },
                             None => error!("No file specified"),
@@ -938,14 +946,18 @@ async fn main() -> Result<()>
                         let rest = cmd.strip_prefix("cid ");
                         match rest {
                             Some(file_name) => {
-                                let sector_size: u64;
-                                let file_size = std::fs::metadata(file_name).unwrap().len();
-                                if file_size > 8323072 {
-                                    sector_size = 536870912
-                                } else {
-                                    sector_size = 8388608
+                                let proof_groups: Vec<ProofGroup>;
+                                {
+                                    let peer_info = PEERINFO.lock().unwrap();
+                                    proof_groups = peer_info.proof_groups.clone();
                                 }
-                                let _child = tokio::spawn(get_cid(file_name.to_string(), sector_size));
+                                if let Some(proof_group) = proof_groups.iter().find(|&p| p.unsealed_cid == file_name) {
+                                    let sector_size: u64 = proof_group.sector_size;
+                                    let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
+                                }
+                                else {
+                                    error!("No such block in local");
+                                }
                             },
                             None => error!("No file specified"),
                         }

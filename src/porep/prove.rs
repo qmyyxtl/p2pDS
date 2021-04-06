@@ -1,7 +1,9 @@
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
-use std::io::{BufReader};
+use std::io::prelude::*;
+use std::io::{Cursor, BufReader, SeekFrom};
+use std::convert::TryInto;
 use super::seal::*;
 use super::registry::{RegisteredSealProof};
 use tempfile::{NamedTempFile};
@@ -16,6 +18,18 @@ pub use storage_proofs::error::Error as StorageProofsError;
 pub use storage_proofs::post::election::Candidate;
 pub use storage_proofs::sector::{OrderedSectorSet, SectorId};
 use filecoin_hashers::{Hasher};
+use crate::STORAGE_BLOCK_PATH;
+use crate::types::ProofGroup;
+use std::rc::Rc;
+
+pub fn cid_2_bytes(cid: String) -> [u8; 32] {
+    let vec = base64::decode_config(cid, base64::URL_SAFE_NO_PAD).unwrap();
+    vec.as_slice().try_into().expect("decode with incorrect length")
+}
+
+pub fn bytes_2_cid(b: [u8; 32]) -> String {
+    base64::encode_config(b, base64::URL_SAFE_NO_PAD)
+}
 
 pub struct FilePoRep {
     pub registered_proof: RegisteredSealProof,
@@ -30,7 +44,7 @@ pub struct FilePoRep {
 
 pub struct FileProver {
     pub registered_proof: RegisteredSealProof,
-    pub file_path: String,
+    pub group: ProofGroup,
     pub cache_path: PathBuf,
     pub sealed_path: PathBuf,
     pub sector_size: u64,
@@ -48,23 +62,30 @@ pub struct FileProver {
 }
 
 impl FileProver {
-    pub fn pre_commit1(&mut self) {
+    pub fn pre_commit1(&mut self) -> std::result::Result<(), &'static str> {
         File::create(self.sealed_path.clone()).unwrap();
         let sector_size_unpadded_bytes_amount = self.sector_size - (self.sector_size / 128);
 
-        let mut tmp_file = self.cache_path.clone();
-        let name = PathBuf::from(&self.file_path);
-        let name = name.file_name().unwrap();
-        tmp_file.push(name);
-        fs::copy(&self.file_path, &tmp_file).unwrap();
-
-        let f_data = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&tmp_file).unwrap();
-        // Zero-pad the data to the requested size by extending the underlying file if needed.
-        f_data.set_len(sector_size_unpadded_bytes_amount as u64).unwrap();
-        let source = BufReader::new(File::open(&tmp_file).expect("File open failed"));
+        let mut buffer = Vec::new();
+        // if is_group {
+            let blocks: &Vec<String> = &self.group.blocks;
+            for block in blocks.iter() {
+                let mut path = STORAGE_BLOCK_PATH.to_string();
+                path.push_str(&block);
+                let mut file = OpenOptions::new().read(true).open(path).unwrap();
+                file.read_to_end(&mut buffer).unwrap();
+            }
+        // }
+        // else {
+        //     let mut path = STORAGE_BLOCK_PATH.to_string();
+        //     path.push_str(&self.file_path);
+        //     let mut file = OpenOptions::new().read(true).open(path).unwrap();
+        //     file.read_to_end(&mut buffer).unwrap();
+        // }
+        buffer.resize(sector_size_unpadded_bytes_amount as usize, 0);
+        let buffer2 = buffer.clone();
+        let source = Cursor::new(buffer);
+        let mut source2 = Cursor::new(buffer2);
 
         let piece_size =
             UnpaddedBytesAmount::from(PaddedBytesAmount(self.sector_size));
@@ -73,11 +94,13 @@ impl FileProver {
             source,
             piece_size,
         ).unwrap();
-        let mut source = File::open(&tmp_file).expect("File open failed");
         let commitment = meta.commitment;
+        if bytes_2_cid(commitment) != self.group.unsealed_cid {
+            return Err("unsealed cid not match")
+        }
         let mut staged_sector_file = NamedTempFile::new().unwrap();
         add_piece(
-            &mut source,
+            &mut source2,
             &mut staged_sector_file,
             piece_size,
             &[],
@@ -97,6 +120,7 @@ impl FileProver {
         self.comm_d = p1result.comm_d;
         self.config = p1result.config;
         self.labels = p1result.labels;
+        Ok(())
     }
 
     pub fn pre_commit2(&mut self) {

@@ -21,12 +21,22 @@ pub struct SealerOutput {
     pub proof: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProofGroup {
+    pub unsealed_cid: String,
+    pub sector_size: u64,
+    pub unpadded_size: u64,
+    pub size: u64,
+    pub blocks: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PeerMetadata {
     pub capacity: usize,
     pub stored_size: usize,
     pub willing: f32,
     pub file: HashMap<String, FileMeta>,
+    pub proof_groups: Vec<ProofGroup>,
     pub data_blocks: HashMap<String, DataBlock>,
 }
 

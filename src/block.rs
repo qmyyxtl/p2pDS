@@ -4,12 +4,12 @@ use std::sync::Mutex;
 use std::collections::{HashMap};
 use log::{info};
 use tokio::{fs};
-use crate::porep::get_unsealed_id;
+use crate::porep::{get_unsealed_id, get_group_unsealed_id};
 
 use crate::types::*;
 use crate::STORAGE_FILE_PATH;
 use crate::STORAGE_BLOCK_PATH;
-use crate::{CODE_M};
+use crate::{CODE_M, PEERINFO};
 
 lazy_static! {
     pub static ref PENDING_FILES: Mutex<HashMap<String, TempFile>> = {
@@ -126,4 +126,44 @@ pub fn recover_node(block_id: &str) -> bool {
     // let block_size = block_info.size;
     // let mut vec: Vec<u8> = vec![0; block_size];
     true
+}
+
+pub fn add_to_prove_group(blocks: &mut Vec<DataBlock>, peer_info: &mut PeerMetadata) -> std::result::Result<(), &'static str>{
+    let proof_groups = &mut peer_info.proof_groups;
+    let mut block_head: &DataBlock = &blocks[0];
+    let mut block_updated = false;
+    for proof_group in proof_groups {
+        let block_size = block_head.size as u64;
+        if block_size + proof_group.size <= proof_group.unpadded_size {
+            proof_group.size += block_size;
+            proof_group.blocks.push(block_head.block_id.clone());
+            blocks.remove(0);
+            if blocks.len() == 0 {
+                break;
+            }
+            block_head = &blocks[0];
+            block_updated = true;
+        } else {
+            if block_updated {
+                proof_group.unsealed_cid = get_group_unsealed_id(&proof_group);
+            }
+        }
+    }
+    if blocks.len() > 0 {
+        let proof_groups = &mut peer_info.proof_groups;
+        let mut new_group = ProofGroup {
+            unsealed_cid: String::new(),
+            sector_size: 536870912,
+            unpadded_size: 532676608,
+            size: 0,
+            blocks: Vec::new(),
+        };
+        for block in blocks {
+            new_group.size += block.size as u64;
+            new_group.blocks.push(block.block_id.clone());
+        }
+        new_group.unsealed_cid = get_group_unsealed_id(&new_group);
+        proof_groups.push(new_group);
+    }
+    Ok(())
 }

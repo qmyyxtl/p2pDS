@@ -6,9 +6,10 @@ use std::io::{BufReader};
 use uuid::Uuid;
 use std::fs;
 use base64;
-use std::convert::TryInto;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::io::prelude::*;
+use std::io::Cursor;
 
 mod seal;
 mod registry;
@@ -16,7 +17,7 @@ mod prove;
 
 use registry::{RegisteredSealProof};
 use seal::{generate_piece_commitment, Labels, VanillaSealProof};
-use prove::{FilePoRep, FileProver, porep_verifier};
+use prove::{FilePoRep, FileProver, porep_verifier, cid_2_bytes, bytes_2_cid};
 
 use storage_proofs::sector::{SectorId};
 use filecoin_proofs_v1::{types::{
@@ -30,7 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::block::*;
-use crate::types::{ProofResponse, SealerOutput};
+use crate::types::{ProofResponse, SealerOutput, ProofGroup};
 use crate::STORAGE_BLOCK_PATH;
 
 
@@ -42,13 +43,60 @@ lazy_static! {
     };    
 }
 
-pub fn cid_2_bytes(cid: String) -> [u8; 32] {
-    let vec = base64::decode_config(cid, base64::URL_SAFE_NO_PAD).unwrap();
-    vec.as_slice().try_into().expect("decode with incorrect length")
-}
+pub fn get_group_unsealed_id(group: &ProofGroup) -> String {
+    let registered_proof: RegisteredSealProof;
+    let sector_size = group.sector_size;
+    match sector_size {
+        536870912 => {
+            registered_proof = RegisteredSealProof::StackedDrg512MiBV1_1
+        },
+        8388608 => {
+            registered_proof = RegisteredSealProof::StackedDrg8MiBV1_1
+        },
+        _ => panic!("sector size not supported"),
+    };
 
-pub fn bytes_2_cid(b: [u8; 32]) -> String {
-    base64::encode_config(b, base64::URL_SAFE_NO_PAD)
+    let uuid = Uuid::new_v4().to_simple().to_string();
+    let mut sealer_dir = PathBuf::from("sealer_cache");
+    sealer_dir.push(uuid.clone());
+    let mut cache_path = sealer_dir.clone();
+    cache_path.push("cache");
+    if !cache_path.exists() {
+        create_dir_all(&cache_path).unwrap();
+    }
+    let sector_size_unpadded_bytes_amount = sector_size - (sector_size / 128);
+
+    // let mut tmp_file = cache_path.clone();
+    // tmp_file.push(uuid);
+    // let f_data = OpenOptions::new()
+    //     .read(true)
+    //     .write(true)
+    //     .create(true)
+    //     .open(&tmp_file).unwrap();
+
+    let mut buffer = Vec::new();
+    for block in &group.blocks {
+        let mut path = STORAGE_BLOCK_PATH.to_string();
+        path.push_str(&block);
+        let mut file = OpenOptions::new().read(true).open(path).unwrap();
+        file.read_to_end(&mut buffer).unwrap();
+    }
+    buffer.resize(sector_size_unpadded_bytes_amount as usize, 0);
+    let source = Cursor::new(buffer);
+
+    // Zero-pad the data to the requested size by extending the underlying file if needed.
+    // f_data.set_len(sector_size_unpadded_bytes_amount as u64).unwrap();
+    // let source = BufReader::new(File::open(&tmp_file).expect("File open failed"));
+
+    let piece_size =
+        UnpaddedBytesAmount::from(PaddedBytesAmount(sector_size));
+    let meta = generate_piece_commitment(
+        registered_proof.into(),
+        source,
+        piece_size,
+    ).unwrap();
+    let commitment = meta.commitment;
+    bytes_2_cid(commitment)
 }
 
 pub async fn get_unsealed_id(filename: &String, sector_size: u64) -> String {
@@ -98,7 +146,7 @@ pub async fn get_unsealed_id(filename: &String, sector_size: u64) -> String {
     bytes_2_cid(commitment)
 }
 
-pub async fn get_cid(filename: String, sector_size: u64) -> std::result::Result<Vec<u8>, &'static str> {
+pub async fn get_cid(group: ProofGroup, sector_size: u64) -> std::result::Result<Vec<u8>, &'static str> {
     let sector_id = SectorId::from(0);
     let prover_id: [u8; 32] = [1; 32];
     let ticket_bytes: [u8; 32] = [1; 32];
@@ -127,7 +175,7 @@ pub async fn get_cid(filename: String, sector_size: u64) -> std::result::Result<
 
     let mut prover = FileProver{
         registered_proof,
-        file_path: filename,
+        group,
         cache_path,
         sealed_path,
         sector_size,
@@ -143,7 +191,7 @@ pub async fn get_cid(filename: String, sector_size: u64) -> std::result::Result<
         vanilla_proofs: VanillaSealProof::StackedDrg8MiBV1(Vec::new()),
         replica_id: PoseidonDomain::default(),
     };
-    prover.pre_commit1();
+    prover.pre_commit1().unwrap();
     prover.pre_commit2();
     prover.commit1();
     let proof = prover.commit2();
@@ -163,9 +211,7 @@ pub async fn get_cid(filename: String, sector_size: u64) -> std::result::Result<
     Ok(proof)
 }
 
-fn prove_file_inner(sealer_id: &String, block_id: &String, sector_size: u64, gpu_parallel: usize) -> SealerOutput {
-    let mut path = STORAGE_BLOCK_PATH.to_string();
-    path.push_str(&block_id.clone());
+fn prove_file_inner(sealer_id: &String, group: &ProofGroup, sector_size: u64, gpu_parallel: usize) -> std::result::Result<SealerOutput, &'static str> {
     let sector_id = SectorId::from(0);
     let prover_id: [u8; 32] = [1; 32];
     let ticket_bytes: [u8; 32] = [1; 32];
@@ -187,7 +233,7 @@ fn prove_file_inner(sealer_id: &String, block_id: &String, sector_size: u64, gpu
             let registered_proof = RegisteredSealProof::StackedDrg8MiBV1_1;
             prover = FileProver{
                 registered_proof,
-                file_path: path,
+                group: group.clone(),
                 cache_path,
                 sealed_path,
                 sector_size,
@@ -208,7 +254,7 @@ fn prove_file_inner(sealer_id: &String, block_id: &String, sector_size: u64, gpu
             let registered_proof = RegisteredSealProof::StackedDrg512MiBV1_1;
             prover = FileProver{
                 registered_proof,
-                file_path: path,
+                group: group.clone(),
                 cache_path,
                 sealed_path,
                 sector_size,
@@ -230,7 +276,10 @@ fn prove_file_inner(sealer_id: &String, block_id: &String, sector_size: u64, gpu
         }
     }
 
-    prover.pre_commit1();
+    if let Err(e) = prover.pre_commit1() {
+        return Err(e)
+    }
+
     let mut flg = true;
     let ten_millis = Duration::from_millis(10);
     // while flg {
@@ -284,29 +333,18 @@ fn prove_file_inner(sealer_id: &String, block_id: &String, sector_size: u64, gpu
         proof,
     };
     remove_dir_all(sealer_dir).unwrap();
-    sealer_output
+    Ok(sealer_output)
 }
 
-pub fn prove_file(file_name: String, tx: mpsc::UnboundedSender<SealerOutput>, sealer_id: String, sector_size: u64, gpu_parallel: usize, counter: Arc<AtomicBool>) {
+pub fn prove_file(group: ProofGroup, tx: mpsc::UnboundedSender<SealerOutput>, sealer_id: String, sector_size: u64, gpu_parallel: usize, counter: Arc<AtomicBool>) {
     info!("prove thread {} start", sealer_id);
-    let received = prove_file_inner(&sealer_id, &file_name, sector_size, gpu_parallel);
-    // let received = rx1.recv().unwrap();
-    
-    // for i in 0..received.num {
-    if received.unsealed_cid != file_name {
-        let recover_result = recover_node(&file_name);
-        if recover_result {
-            info!("Recover block {} successed, re-proving the block", &file_name);
-        } else {
-            info!("Recover block {} failed", &file_name);
-        }
-    }
-    else{
+    if let Ok(received) = prove_file_inner(&sealer_id, &group, sector_size, gpu_parallel) {
         tx.send(received).expect("Send Seal failed");
     }
-    // child.join().expect("Sealer failed");
+    else {
+        info!("File corruption, try recovering");
+    }
     info!("prove thread {} finished", sealer_id);
-    // }
 }
 
 pub fn verify_file(proof_resp: ProofResponse) -> bool {
