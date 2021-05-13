@@ -153,14 +153,18 @@ pub fn add_to_prove_group(blocks: &mut Vec<DataBlock>, peer_info: &mut PeerMetad
         let proof_groups = &mut peer_info.proof_groups;
         let mut new_group = ProofGroup {
             unsealed_cid: String::new(),
-            sector_size: 536870912,
-            unpadded_size: 532676608,
+            sector_size: 8388608,
+            unpadded_size: 8323072,
             size: 0,
             blocks: Vec::new(),
         };
         for block in blocks {
             new_group.size += block.size as u64;
             new_group.blocks.push(block.block_id.clone());
+        }
+        if new_group.size > 8323072 {
+            new_group.sector_size = 536870912;
+            new_group.unpadded_size = 532676608;
         }
         new_group.unsealed_cid = get_group_unsealed_id(&new_group);
         proof_groups.push(new_group);
