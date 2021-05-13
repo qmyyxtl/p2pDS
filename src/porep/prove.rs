@@ -83,24 +83,23 @@ impl FileProver {
         //     file.read_to_end(&mut buffer).unwrap();
         // }
         buffer.resize(sector_size_unpadded_bytes_amount as usize, 0);
-        let buffer2 = buffer.clone();
-        let source = Cursor::new(buffer);
-        let mut source2 = Cursor::new(buffer2);
+        let mut source = Cursor::new(buffer);
 
         let piece_size =
             UnpaddedBytesAmount::from(PaddedBytesAmount(self.sector_size));
         let meta = generate_piece_commitment(
             self.registered_proof.into(),
-            source,
+            &mut source,
             piece_size,
         ).unwrap();
+        source.seek(SeekFrom::Start(0)).unwrap();
         let commitment = meta.commitment;
-        if bytes_2_cid(commitment) != self.group.unsealed_cid {
-            return Err("unsealed cid not match")
-        }
-        let mut staged_sector_file = NamedTempFile::new().unwrap();
+        // if bytes_2_cid(commitment) != self.group.unsealed_cid {
+        //     return Err("unsealed cid not match")
+        // }
+        let mut staged_sector_file = NamedTempFile::new_in("./test/tmp").unwrap();
         add_piece(
-            &mut source2,
+            &mut source,
             &mut staged_sector_file,
             piece_size,
             &[],
@@ -117,34 +116,43 @@ impl FileProver {
             self.ticket_bytes,
             &self.piece_infos,
         ).unwrap();
+        fs::remove_file(staged_sector_file).unwrap();
         self.comm_d = p1result.comm_d;
         self.config = p1result.config;
         self.labels = p1result.labels;
         Ok(())
     }
 
-    pub fn pre_commit2(&mut self) {
+    pub fn pre_commit2(&mut self, num_threads: usize) {
         let phase1_output = SealPreCommitPhase1Output {
             registered_proof: self.registered_proof,
             labels: self.labels.clone(),
             config: self.config.clone(),
             comm_d: self.comm_d,
         };
-        let phase2_output = seal_pre_commit_phase2(
+        let thread_pool: rayon::ThreadPool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+        let phase2_output = thread_pool.install(|| seal_pre_commit_phase2(
             phase1_output,
             self.cache_path.clone(),
             self.sealed_path.clone(),
-        ).unwrap();
+        )).unwrap();
         self.comm_r = phase2_output.comm_r;
     }
 
-    pub fn commit1(&mut self) {
+    pub fn commit1(&mut self, num_threads: usize) {
         let pc = SealPreCommitPhase2Output {
             registered_proof: self.registered_proof,
             comm_r: self.comm_r,
             comm_d: self.comm_d
         };
-        let phase1_output = seal_commit_phase1::<PathBuf>(
+        let thread_pool: rayon::ThreadPool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap();
+        let phase1_output = thread_pool.install(|| seal_commit_phase1::<PathBuf>(
             self.cache_path.clone(),
             self.sealed_path.clone(),
             self.prover_id,
@@ -153,12 +161,12 @@ impl FileProver {
             self.seed,
             pc,
             &self.piece_infos,
-        ).unwrap();
+        )).unwrap();
         self.vanilla_proofs = phase1_output.vanilla_proofs;
         self.replica_id = phase1_output.replica_id;
     }
 
-    pub fn commit2(&mut self) -> Vec<u8> {
+    pub fn commit2(&mut self, num_threads: usize) -> Vec<u8> {
         let phase1_output = SealCommitPhase1Output {
             registered_proof: self.registered_proof,
             vanilla_proofs: self.vanilla_proofs.clone(),
@@ -168,12 +176,26 @@ impl FileProver {
             seed: self.seed,
             ticket: self.ticket_bytes,
         };
-        let phase2_output = seal_commit_phase2(
-            phase1_output,
-            self.prover_id,
-            self.sector_id,
-        ).unwrap();
-        phase2_output.proof
+        if num_threads > 0 {
+            let thread_pool: rayon::ThreadPool = rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .unwrap();
+            let phase2_output = thread_pool.install(|| seal_commit_phase2(
+                phase1_output,
+                self.prover_id,
+                self.sector_id,
+            )).unwrap();
+            return phase2_output.proof
+        }
+        else {
+            let phase2_output = seal_commit_phase2(
+                phase1_output,
+                self.prover_id,
+                self.sector_id,
+            ).unwrap();
+            return phase2_output.proof
+        }
     }
 }
 

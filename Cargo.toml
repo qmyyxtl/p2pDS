@@ -28,3 +28,5 @@ fr32 = { version = "~0.2.0", default-features = false, features = ["blst"] }
 tempfile = "3.2.0"
 base64 = "0.13.0"
 rayon = "1.5.0"
+sysinfo = "0.16.5"
+num_cpus = "1.13.0"

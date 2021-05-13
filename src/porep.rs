@@ -7,7 +7,7 @@ use uuid::Uuid;
 use std::fs;
 use base64;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{SystemTime, Duration};
 use std::io::prelude::*;
 use std::io::Cursor;
 
@@ -32,15 +32,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::block::*;
 use crate::types::{ProofResponse, SealerOutput, ProofGroup};
-use crate::STORAGE_BLOCK_PATH;
-
+use crate::{STORAGE_BLOCK_PATH, CPU_CNT};
+use sysinfo::{ProcessExt, SystemExt};
 
 lazy_static! {
-    #[derive(Debug)]
     static ref GPU_UTIL: Mutex<usize> = {
         let p: usize = 0;
         Mutex::new(p)
-    };    
+    };
+
+    pub static ref CWND: Mutex<usize> = {
+        let cwnd: usize = 1;
+        Mutex::new(cwnd)
+    };
+
+    pub static ref NTHREADS: Mutex<usize> = {
+        let nthreads: usize = 0;
+        Mutex::new(nthreads)
+    };
+
+    pub static ref MP_PHASES: Mutex<usize> = {
+        let cnt: usize = 0;
+        Mutex::new(cnt)
+    };
 }
 
 pub fn get_group_unsealed_id(group: &ProofGroup) -> String {
@@ -53,11 +67,14 @@ pub fn get_group_unsealed_id(group: &ProofGroup) -> String {
         8388608 => {
             registered_proof = RegisteredSealProof::StackedDrg8MiBV1_1
         },
+        34359738368 => {
+            registered_proof = RegisteredSealProof::StackedDrg32GiBV1_1
+        },
         _ => panic!("sector size not supported"),
     };
 
     let uuid = Uuid::new_v4().to_simple().to_string();
-    let mut sealer_dir = PathBuf::from("sealer_cache");
+    let mut sealer_dir = PathBuf::from("./test/sealer_cache");
     sealer_dir.push(uuid.clone());
     let mut cache_path = sealer_dir.clone();
     cache_path.push("cache");
@@ -108,11 +125,14 @@ pub async fn get_unsealed_id(filename: &String, sector_size: u64) -> String {
         8388608 => {
             registered_proof = RegisteredSealProof::StackedDrg8MiBV1_1
         },
+        34359738368 => {
+            registered_proof = RegisteredSealProof::StackedDrg32GiBV1_1
+        },
         _ => panic!("sector size not supported"),
     };
 
     let uuid = Uuid::new_v4().to_simple().to_string();
-    let mut sealer_dir = PathBuf::from("sealer_cache");
+    let mut sealer_dir = PathBuf::from("./test/sealer_cache");
     sealer_dir.push(uuid.clone());
     let mut cache_path = sealer_dir.clone();
     cache_path.push("cache");
@@ -147,6 +167,7 @@ pub async fn get_unsealed_id(filename: &String, sector_size: u64) -> String {
 }
 
 pub async fn get_cid(group: ProofGroup, sector_size: u64) -> std::result::Result<Vec<u8>, &'static str> {
+    let cpu_cnt = unsafe { CPU_CNT };
     let sector_id = SectorId::from(0);
     let prover_id: [u8; 32] = [1; 32];
     let ticket_bytes: [u8; 32] = [1; 32];
@@ -159,11 +180,14 @@ pub async fn get_cid(group: ProofGroup, sector_size: u64) -> std::result::Result
         8388608 => {
             registered_proof = RegisteredSealProof::StackedDrg8MiBV1_1
         },
+        34359738368 => {
+            registered_proof = RegisteredSealProof::StackedDrg32GiBV1_1
+        },
         _ => panic!("sector size not supported"),
     };
 
     let uuid = Uuid::new_v4().to_simple().to_string();
-    let mut sealer_dir = PathBuf::from("sealer_cache");
+    let mut sealer_dir = PathBuf::from("./test/sealer_cache");
     sealer_dir.push(uuid.clone());
     let mut cache_path = sealer_dir.clone();
     cache_path.push("cache");
@@ -191,10 +215,13 @@ pub async fn get_cid(group: ProofGroup, sector_size: u64) -> std::result::Result
         vanilla_proofs: VanillaSealProof::StackedDrg8MiBV1(Vec::new()),
         replica_id: PoseidonDomain::default(),
     };
+
+    let start = SystemTime::now();
+    
     prover.pre_commit1().unwrap();
-    prover.pre_commit2();
-    prover.commit1();
-    let proof = prover.commit2();
+    prover.pre_commit2(8);
+    prover.commit1(8);
+    let proof = prover.commit2(0);
     info!("{:?}", &proof);
     let porep = FilePoRep{
         registered_proof,
@@ -206,6 +233,12 @@ pub async fn get_cid(group: ProofGroup, sector_size: u64) -> std::result::Result
         seed,
         proof: proof.clone(),
     };
+    let end = SystemTime::now();
+    let diff = end
+        .duration_since(start)
+        .expect("Time went backwards");
+    info!("Bench time {:?}", diff);
+
     let res = porep_verifier(porep);
     info!("{:?}", &res);
     Ok(proof)
@@ -217,7 +250,7 @@ fn prove_file_inner(sealer_id: &String, group: &ProofGroup, sector_size: u64, gp
     let ticket_bytes: [u8; 32] = [1; 32];
     let seed: [u8; 32] = [1; 32];
     let uuid = Uuid::new_v4().to_simple().to_string();
-    let mut sealer_dir = PathBuf::from("sealer_cache");
+    let mut sealer_dir = PathBuf::from("./test/sealer_cache");
     sealer_dir.push(uuid.clone());
     let mut cache_path = sealer_dir.clone();
     cache_path.push("cache");
@@ -271,17 +304,56 @@ fn prove_file_inner(sealer_id: &String, group: &ProofGroup, sector_size: u64, gp
                 replica_id: PoseidonDomain::default(),
             };
         },
+        34359738368 => {
+            let registered_proof = RegisteredSealProof::StackedDrg32GiBV1_1;
+            prover = FileProver{
+                registered_proof,
+                group: group.clone(),
+                cache_path,
+                sealed_path,
+                sector_size,
+                seed,
+                ticket_bytes,
+                prover_id,
+                sector_id,
+                comm_d: [0; 32],
+                comm_r: [0; 32],
+                labels: Labels::StackedDrg32GiBV1(RawLabels::new(Vec::new())),
+                config: filecoin_proofs_v1::StoreConfig::new("", "", 0),
+                piece_infos: Vec::new(),
+                vanilla_proofs: VanillaSealProof::StackedDrg32GiBV1(Vec::new()),
+                replica_id: PoseidonDomain::default(),
+            };
+        },
         _ => {
             panic!("not supported");
         }
     }
+    let ten_millis = Duration::from_millis(100);
 
+    loop {
+        {
+            let cwnd = CWND.lock().unwrap();
+            let mut n_thread = NTHREADS.lock().unwrap();
+            if *n_thread < *cwnd {
+                *n_thread += 1;
+                break;
+            }
+        }
+        std::thread::sleep(ten_millis);
+    }
+    info!("thread {} p1 start", sealer_id);
     if let Err(e) = prover.pre_commit1() {
+        let mut n_thread = NTHREADS.lock().unwrap();
+        *n_thread -= 1;
         return Err(e)
     }
+    info!("thread {} p1 finish", sealer_id);
+    {
+        let mut n_thread = NTHREADS.lock().unwrap();
+        *n_thread -= 1;
+    }
 
-    let mut flg = true;
-    let ten_millis = Duration::from_millis(10);
     // while flg {
     //     {
     //         let mut gpu_util = GPU_UTIL.lock().unwrap();
@@ -296,28 +368,103 @@ fn prove_file_inner(sealer_id: &String, group: &ProofGroup, sector_size: u64, gp
     //     std::thread::sleep(ten_millis);
     // }
     // flg = true;
-    prover.pre_commit2();
+    let mut num_threads = 0;
+    loop {
+        {
+            let cwnd = CWND.lock().unwrap();
+            let mut n_thread = NTHREADS.lock().unwrap();
+            if *n_thread < *cwnd {
+                num_threads = *cwnd - *n_thread;
+                *n_thread = *cwnd;
+                break;
+            }
+        }
+        std::thread::sleep(ten_millis);
+    }
+    // loop {
+    //     {
+    //         let mut cnt = MP_PHASES.lock().unwrap();
+    //         if *cnt < 4 {
+    //             *cnt += 1;
+    //             break;
+    //         }
+    //     }
+    //     std::thread::sleep(ten_millis);
+    // }
+    info!("thread {} p2 start", sealer_id);
+    prover.pre_commit2(48);
+    info!("thread {} p2 finish", sealer_id);
+    {
+        let mut n_thread = NTHREADS.lock().unwrap();
+        *n_thread -= num_threads;
+    }
+    num_threads = 0;
     // {
     //     let mut gpu_util = GPU_UTIL.lock().unwrap();
     //     *gpu_util -= 1;
     // }
-    prover.commit1();
 
-    while flg {
+    loop {
         {
-            let mut gpu_util = GPU_UTIL.lock().unwrap();
-            if *gpu_util < gpu_parallel {
-                *gpu_util += 1;
-                flg = false;
+            let cwnd = CWND.lock().unwrap();
+            let mut n_thread = NTHREADS.lock().unwrap();
+            if *n_thread < *cwnd {
+                num_threads = *cwnd - *n_thread;
+                *n_thread = *cwnd;
+                break;
             }
-        }
-        if !flg {
-            break;
         }
         std::thread::sleep(ten_millis);
     }
-    let proof = prover.commit2();
+    info!("thread {} c1 start", sealer_id);
+    prover.commit1(48);
+    info!("thread {} c1 finish", sealer_id);
+    // {
+    //     let mut cnt = MP_PHASES.lock().unwrap();
+    //     *cnt -= 1;
+    // }
     {
+        let mut n_thread = NTHREADS.lock().unwrap();
+        *n_thread -= num_threads;
+    }
+    num_threads = 0;
+
+    if gpu_parallel == 0{
+        loop {
+            {
+                let cwnd = CWND.lock().unwrap();
+                let mut n_thread = NTHREADS.lock().unwrap();
+                if *n_thread < *cwnd {
+                    num_threads = *cwnd - *n_thread;
+                    *n_thread = *cwnd;
+                    break;
+                }
+            }
+            std::thread::sleep(ten_millis);
+        }
+    }
+    else {
+        loop {
+            {
+                let mut gpu_util = GPU_UTIL.lock().unwrap();
+                if *gpu_util < gpu_parallel {
+                    *gpu_util += 1;
+                    break;
+                }
+            }
+            std::thread::sleep(ten_millis);
+        }
+    }
+
+    info!("thread {} c2 start", sealer_id);
+    let proof = prover.commit2(num_threads);
+    info!("thread {} c2 finish", sealer_id);
+    if gpu_parallel == 0{
+        let mut n_thread = NTHREADS.lock().unwrap();
+        *n_thread -= num_threads;
+        num_threads = 0;
+    }
+    else {
         let mut gpu_util = GPU_UTIL.lock().unwrap();
         *gpu_util -= 1;
     }
@@ -359,6 +506,9 @@ pub fn verify_file(proof_resp: ProofResponse) -> bool {
         },
         8388608 => {
             registered_proof = RegisteredSealProof::StackedDrg8MiBV1_1
+        },
+        34359738368 => {
+            registered_proof = RegisteredSealProof::StackedDrg32GiBV1_1
         },
         _ => panic!("sector size not supported"),
     };

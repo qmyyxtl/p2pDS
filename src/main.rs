@@ -23,6 +23,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use num_cpus;
 
 mod types;
 use types::*;
@@ -32,6 +33,8 @@ mod benchmark;
 use benchmark::*;
 mod porep;
 use porep::*;
+
+static mut CPU_CNT: usize = 1;
 
 fn load_peer_data() -> PeerMetadata {
     let content = std::fs::read(STORAGE_FILE_PATH).unwrap();
@@ -737,6 +740,7 @@ fn cleanup() {
 #[tokio::main]
 async fn main() -> Result<()>
 {
+    unsafe { CPU_CNT = num_cpus::get(); }
     pretty_env_logger::init();
 
     info!("Peer Id: {}", PEER_ID.clone());
@@ -943,23 +947,36 @@ async fn main() -> Result<()>
                         }
                     },
                     cmd if cmd.starts_with("cid") => {
-                        let rest = cmd.strip_prefix("cid ");
-                        match rest {
-                            Some(file_name) => {
-                                let proof_groups: Vec<ProofGroup>;
-                                {
-                                    let peer_info = PEERINFO.lock().unwrap();
-                                    proof_groups = peer_info.proof_groups.clone();
-                                }
-                                if let Some(proof_group) = proof_groups.iter().find(|&p| p.unsealed_cid == file_name) {
-                                    let sector_size: u64 = proof_group.sector_size;
+                        let rest = cmd.strip_prefix("cid ").unwrap();
+                        let mut opt = rest.split(" ");
+                        let vec: Vec<&str> = opt.collect();
+                        let file_name = vec[0];
+                        let ssize = vec[1];
+                        let proof_groups: Vec<ProofGroup>;
+                        {
+                            let peer_info = PEERINFO.lock().unwrap();
+                            proof_groups = peer_info.proof_groups.clone();
+                        }
+                        if let Some(proof_group) = proof_groups.iter().find(|&p| p.unsealed_cid == file_name) {
+                            let sector_size: u64;
+                            match ssize {
+                                "8" => {
+                                    sector_size = 8388608;
                                     let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
-                                }
-                                else {
-                                    error!("No such block in local");
-                                }
-                            },
-                            None => error!("No file specified"),
+                                },
+                                "512" => {
+                                    sector_size = 536870912;
+                                    let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
+                                },
+                                "32" => {
+                                    sector_size = 34359738368;
+                                    let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
+                                },
+                                _ => error!("Wrong sector size specified"),
+                            }
+                        }
+                        else {
+                            error!("No such block in local");
                         }
                     },
                     cmd if cmd.starts_with("clean") => {
