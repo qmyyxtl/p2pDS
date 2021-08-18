@@ -19,3 +19,6 @@ Cargo.lock
 
 sealer_cache/
 private*
+*.txt
+*stat*
+data.json

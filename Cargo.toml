@@ -19,7 +19,7 @@ uuid = { version = "0.8", features = ["serde", "v4"] }
 libc = "0.2"
 anyhow = "1.0.26"
 bincode = "1.1.2"
-filecoin-proofs-v1 = { package = "filecoin-proofs", path = "/home/wcg/.cargo/registry/src/github.com-1ecc6299db9ec823/filecoin-proofs-6.1.0", default-features = false, features = ["blst","gpu"] }
+filecoin-proofs-v1 = { package = "filecoin-proofs",  version = "6.1.0",default-features = false, features = ["blst","gpu"] }
 storage-proofs = { version="6.0.0", default-features = false, features = ["blst","gpu"] }
 storage-proofs-porep = { version="6.1.0", default-features = false, features = ["blst","gpu"] }
 filecoin-hashers = { version = "~1.1.0", default-features = false, features = ["poseidon", "sha256"] }

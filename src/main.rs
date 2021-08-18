@@ -115,6 +115,7 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for DataBlockBehaviour {
                 if let Ok(broad) = serde_json::from_slice::<PeerInfoBroadcast>(&msg.data) {
                     debug!("{:?}", broad);
                     let mut p = PEERINFO.lock().unwrap();
+                    // broadcast the local blocks
                     // let peer_id = broad.peer_id;
                     for (block_id, block) in broad.local_blocks.iter() {
                         let remote_block = DataBlock {
@@ -173,6 +174,7 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for DataBlockBehaviour {
                     }
                 } else if let Ok(req) = serde_json::from_slice::<RecoverRequest>(&msg.data) {
                     debug!("{:?}", req);
+                    //recover the block
                     if req.receiver == PEER_ID.to_string() {
                         respond_block(
                             self.recoverreq_sender.clone(),
@@ -532,25 +534,33 @@ async fn handle_get_block(cmd: &str, swarm: &mut Swarm<DataBlockBehaviour>) {
     let rest = cmd.strip_prefix("get ");
     match rest {
         Some(block_id) => {
-            let block_meta = get_metadataby_id(block_id.to_string()).await.unwrap();
-            if block_meta.local {
-                let (_, bytes): (DataBlock, Vec<u8>) = read_block_data(block_id.to_string()).await.unwrap();
-                info!("{:?}", bytes);
-            } else {
-                // let mut receiver: String;
-                // for pid in block_meta.peers {
-                //     if pid != PEER_ID.to_string() {
-                //         receiver = pid;
-                //         break;
-                //     }
-                // }
-                let req = BlockRequest {
-                    block_id: block_meta.block_id.to_string(),
-                    receiver: block_meta.peers.first().unwrap().to_string(),
-                };
-                let json = serde_json::to_string(&req).expect("can jsonify request");
-                swarm.gossipsub.publish(TOPIC.clone(), json.as_bytes()).expect("swarm publish failed");
+            let meta_result = get_metadataby_id(block_id.to_string()).await;
+            let meta_tmp = meta_result.clone();
+            match meta_result {
+                Ok(_) => {
+                    let block_meta =meta_tmp.unwrap();
+                    if block_meta.local {
+                        let (_, bytes): (DataBlock, Vec<u8>) = read_block_data(block_id.to_string()).await.unwrap();
+                            info!("{:?}", bytes);
+                    } else {
+                    // let mut receiver: String;
+                    // for pid in block_meta.peers {
+                    //     if pid != PEER_ID.to_string() {
+                    //         receiver = pid;
+                    //         break;
+                    //     }
+                    // }
+                        let req = BlockRequest {
+                            block_id: block_meta.block_id.to_string(),
+                            receiver: block_meta.peers.first().unwrap().to_string(),
+                        };
+                        let json = serde_json::to_string(&req).expect("can jsonify request");
+                        swarm.gossipsub.publish(TOPIC.clone(), json.as_bytes()).expect("swarm publish failed");
+                    }
+                },
+                Err(_) => error!("no block id, type ls r to see the block id"),
             }
+            
         },
         None => error!("error fetching local recipes to answer ALL request"),
     };
