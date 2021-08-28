@@ -13,7 +13,7 @@ use libp2p::{
 use log::{error, info, debug, warn};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, io::Write};
 use tokio::{fs, io::AsyncBufReadExt, sync::mpsc};
 #[macro_use]
 extern crate lazy_static;
@@ -543,13 +543,6 @@ async fn handle_get_block(cmd: &str, swarm: &mut Swarm<DataBlockBehaviour>) {
                         let (_, bytes): (DataBlock, Vec<u8>) = read_block_data(block_id.to_string()).await.unwrap();
                             info!("{:?}", bytes);
                     } else {
-                    // let mut receiver: String;
-                    // for pid in block_meta.peers {
-                    //     if pid != PEER_ID.to_string() {
-                    //         receiver = pid;
-                    //         break;
-                    //     }
-                    // }
                         let req = BlockRequest {
                             block_id: block_meta.block_id.to_string(),
                             receiver: block_meta.peers.first().unwrap().to_string(),
@@ -737,7 +730,67 @@ fn cleanup() {
     let j = serde_json::to_string(&*peer_info).unwrap();
     std::fs::write(STORAGE_FILE_PATH, j).expect("Unable to write file");
 }
-
+fn handle_help(cmd :&str) {
+    let rest = cmd.strip_prefix("help ");
+    match rest {
+        Some(cmd_tmp) => {
+            match cmd_tmp {
+                "ls" => {
+                    println!("ls [p | r]");
+                    println!("  p: Show all the peers discovered");
+                    println!("  r: Show all the recipes in this peer");
+                },
+                "get" => {
+                    println!("get [bid]");
+                    println!("  bid: The block id");
+                    println!("  Show the content by bid. You can type ls r to see the block id in local");
+                    println!("  The content will be shown by ASCII");
+                },
+                "clean" => {
+                    println!("clean the metadata");
+                },
+                "cast" => {
+                    println!("broadcast to the peers discovered");
+                },
+                "store" => {
+                    println!("store [fname]");
+                    println!("  Store the file by fname. Be sure you have created a directory named blocks");
+                },
+                "load" => {
+                    println!("load [unsealed_cid]");
+                    println!("  Load the file. This function will find all this file's blocks and extract them to the directory named extract");
+                    println!("  Be sure you have created a directory named blocks");
+                },
+                "prove" => {
+                    println!("prove [unsealed_cid]");
+                    println!("  Prove the file")
+                },
+                "recover" => {
+                    println!("recover [bid]");
+                    println!("  Recover the block by bid");
+                }
+                "cid" => {
+                    println!("cid [unsealed_cid] [ssize]");
+                    println!("  ssize should be 8, 32 or 512");
+                }
+                _ => println!("No such command!")
+            }
+            
+        },
+        None => {
+            println!("Welcome to p2pDS!\nThese shell commands are defined internally.  Type `help' to see this list.\nType `help name' to find out more about the function `name'.\n");
+            println!("ls [p | r]");
+            println!("get [bid]");
+            println!("load [fid]");
+            println!("store [fname]");
+            println!("recover [bid]");
+            println!("prove [unsealed_cid]");
+            println!("cid [unsealed_cid] [ssize]");
+            println!("clean");
+            println!("cast")
+        },
+    };
+}
 // async fn load_file(fname: &str) -> Result<Vec<u8>> {
 //     let mut path = STORAGE_BLOCK_PATH.to_string();
 //     path.push_str(fname);
@@ -843,6 +896,8 @@ async fn main() -> Result<()>
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(180));
     loop {
+        print!("> ");
+        std::io::stdout().flush();
         let evt = {
             tokio::select! {
                 line = stdin.next_line() => Some(EventType::Input(line.expect("can get line").expect("can read line from stdin"))),
@@ -957,41 +1012,52 @@ async fn main() -> Result<()>
                         }
                     },
                     cmd if cmd.starts_with("cid") => {
-                        let rest = cmd.strip_prefix("cid ").unwrap();
-                        let mut opt = rest.split(" ");
-                        let vec: Vec<&str> = opt.collect();
-                        let file_name = vec[0];
-                        let ssize = vec[1];
-                        let proof_groups: Vec<ProofGroup>;
-                        {
-                            let peer_info = PEERINFO.lock().unwrap();
-                            proof_groups = peer_info.proof_groups.clone();
-                        }
-                        if let Some(proof_group) = proof_groups.iter().find(|&p| p.unsealed_cid == file_name) {
-                            let sector_size: u64;
-                            match ssize {
-                                "8" => {
-                                    sector_size = 8388608;
-                                    let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
-                                },
-                                "512" => {
-                                    sector_size = 536870912;
-                                    let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
-                                },
-                                "32" => {
-                                    sector_size = 34359738368;
-                                    let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
-                                },
-                                _ => error!("Wrong sector size specified"),
-                            }
-                        }
-                        else {
-                            error!("No such block in local");
+                        let rest_tmp = cmd.strip_prefix("cid ");
+                        match rest_tmp {
+                            Some(rest) => {
+                                let opt = rest.split(" ");
+                                let vec: Vec<&str> = opt.collect();
+                                if vec.len()==2 {
+                                    let file_name = vec[0];
+                                    let ssize = vec[1];
+                                    let proof_groups: Vec<ProofGroup>;
+                                    {
+                                        let peer_info = PEERINFO.lock().unwrap();
+                                        proof_groups = peer_info.proof_groups.clone();
+                                    }
+                                    if let Some(proof_group) = proof_groups.iter().find(|&p| p.unsealed_cid == file_name) {
+                                        let sector_size: u64;
+                                        match ssize {
+                                            "8" => {
+                                                sector_size = 8388608;
+                                                let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
+                                            },
+                                            "512" => {
+                                                sector_size = 536870912;
+                                                let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
+                                            },
+                                            "32" => {
+                                                sector_size = 34359738368;
+                                                let _child = tokio::spawn(get_cid(proof_group.clone(), sector_size));
+                                            },
+                                            _ => error!("Wrong sector size specified"),
+                                        }
+                                    }
+                                    else {
+                                        error!("No such block in local");
+                                    }
+                                }
+                                else {
+                                    error!("Missing parameter! Type help cid to check")
+                                }
+                            },
+                            None => error!("Missing parameter! Type help cid to check"),
                         }
                     },
                     cmd if cmd.starts_with("clean") => {
                         cleanup();
                     },
+                    cmd if cmd.starts_with("help") => handle_help(cmd),
                     cmd if cmd.starts_with("bench") => {
                         let rest = cmd.strip_prefix("bench ");
                         match rest {
@@ -1010,7 +1076,7 @@ async fn main() -> Result<()>
                             None => error!("No bench specified"),
                         }
                     },
-                    _ => error!("unknown command"),
+                    _ => error!("unknown command,type help to check"),
                 }
                 // EventType::Timer() => {
                 //     let child = tokio::spawn(start_period(prove_tx.clone()));
